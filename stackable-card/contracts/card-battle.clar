@@ -5,6 +5,8 @@
 (define-constant ERR-NOT-FOUND (err u101))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u102))
 (define-constant ERR-INVALID-TRANSFER (err u103))
+(define-constant ERR-INVALID-INPUT (err u104))
+(define-constant MAX-UINT u340282366920938463463374607431768211455)
 
 ;; Data Variables
 (define-data-var contract-owner principal tx-sender)
@@ -61,24 +63,38 @@
 (define-public (mint-card (name (string-ascii 24)) (attack uint) (defense uint) (rarity uint) (recipient principal))
   (let ((id (var-get next-card-id)))
     (if (is-eq tx-sender (var-get contract-owner))
-      (begin
-        (map-set card-details { card-id: id }
-          { 
-            name: name,
-            attack-power: attack,
-            defense-power: defense,
-            rarity-level: rarity,
-            card-owner: recipient
-          })
-        (var-set next-card-id (+ id u1))
-        (ok id))
+      (if (and 
+            (<= (len name) u24)
+            (<= attack u1000)
+            (<= defense u1000)
+            (<= rarity u10)
+            (not (is-eq recipient tx-sender))
+            (not (is-eq recipient (var-get contract-owner)))
+            (not (is-eq recipient 'ST000000000000000000002AMW42H)))
+        (begin
+          (map-set card-details { card-id: id }
+            { 
+              name: name,
+              attack-power: attack,
+              defense-power: defense,
+              rarity-level: rarity,
+              card-owner: recipient
+            })
+          (var-set next-card-id (+ id u1))
+          (ok id))
+        ERR-INVALID-INPUT)
       ERR-OWNER-ONLY)))
 
 (define-public (transfer-card (card-id uint) (recipient principal))
   (let ((sender tx-sender))
-    (if (not (var-get is-paused))
-        (transfer-ownership card-id sender recipient)
-        ERR-OWNER-ONLY)))
+    (if (and 
+          (not (var-get is-paused))
+          (not (is-eq recipient sender))
+          (not (is-eq recipient (var-get contract-owner)))
+          (not (is-eq recipient 'ST000000000000000000002AMW42H))
+          (is-some (get-card-info card-id)))
+      (transfer-ownership card-id sender recipient)
+      ERR-INVALID-TRANSFER)))
 
 (define-public (battle (attacker-id uint) (defender-id uint))
   (let (
@@ -97,7 +113,7 @@
               (get card-owner (unwrap-panic defender)) 
               tx-sender)
             (ok false))
-        ERR-OWNER-ONLY)))
+        ERR-INVALID-TRANSFER)))
 
 (define-public (purchase-card (card-id uint) (price uint))
   (let (
@@ -107,11 +123,12 @@
     (if (and 
           (is-some card)
           (not (is-eq buyer (get card-owner (unwrap-panic card))))
-          (not (var-get is-paused)))
+          (not (var-get is-paused))
+          (< price MAX-UINT))
         (match (stx-transfer? price buyer (get card-owner (unwrap-panic card)))
           success (transfer-ownership card-id (get card-owner (unwrap-panic card)) buyer)
           error ERR-INSUFFICIENT-BALANCE)
-        ERR-OWNER-ONLY)))
+        ERR-INVALID-TRANSFER)))
 
 ;; Admin functions
 (define-public (pause)
@@ -125,6 +142,9 @@
       ERR-OWNER-ONLY))
 
 (define-public (set-contract-owner (new-owner principal))
-  (if (is-eq tx-sender (var-get contract-owner))
+  (if (and 
+        (is-eq tx-sender (var-get contract-owner))
+        (not (is-eq new-owner tx-sender))
+        (not (is-eq new-owner 'ST000000000000000000002AMW42H)))
       (ok (var-set contract-owner new-owner))
       ERR-OWNER-ONLY))
