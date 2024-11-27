@@ -1,10 +1,15 @@
 ;; Collectible Card Game Smart Contract
 
 ;; Constants
-(define-constant CONTRACT-OWNER tx-sender)
 (define-constant ERR-OWNER-ONLY (err u100))
 (define-constant ERR-NOT-FOUND (err u101))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u102))
+(define-constant ERR-INVALID-TRANSFER (err u103))
+
+;; Data Variables
+(define-data-var contract-owner principal tx-sender)
+(define-data-var next-card-id uint u1)
+(define-data-var is-paused bool false)
 
 ;; Data Maps
 (define-map card-details
@@ -25,126 +30,101 @@
 
 (define-map player-balances principal uint)
 
-;; Variables
-(define-data-var next-available-card-id uint u1)
-(define-data-var is-game-paused bool false)
-
 ;; Read-only functions
-
 (define-read-only (get-card-info (card-id uint))
-  (match (map-get? card-details { card-id: card-id })
-    card-info card-info
-    ERR-NOT-FOUND
-  )
+  (map-get? card-details { card-id: card-id })
 )
 
-(define-read-only (get-player-balance (player-address principal))
-  (default-to u0 (map-get? player-balances player-address))
+(define-read-only (get-balance (player principal))
+  (default-to u0 (map-get? player-balances player))
 )
 
-(define-read-only (get-player-cards (player-address principal))
-  (match (map-get? player-card-collection { player: player-address })
-    player-cards (get owned-card-ids player-cards)
-    (list)
-  )
+(define-read-only (get-player-cards (player principal))
+  (default-to { owned-card-ids: (list) }
+    (map-get? player-card-collection { player: player }))
 )
 
 ;; Private functions
-
-(define-private (transfer-card-ownership (card-id uint) (current-owner principal) (new-owner principal))
-  (match (map-get? card-details { card-id: card-id })
-    card (if (and (is-eq (get card-owner card) current-owner) (is-some (map-get? player-card-collection { player: new-owner })))
+(define-private (transfer-ownership (card-id uint) (from principal) (to principal))
+  (let ((card (get-card-info card-id)))
+    (if (and
+          (is-some card)
+          (is-eq (get card-owner (unwrap-panic card)) from))
       (begin
-        (map-set card-details { card-id: card-id }
-          (merge card { card-owner: new-owner }))
-        (map-set player-card-collection { player: current-owner }
-          { owned-card-ids: (filter (lambda (id) (not (is-eq id card-id))) (get-player-cards current-owner)) })
-        (map-set player-card-collection { player: new-owner }
-          { owned-card-ids: (unwrap! (as-max-len? (concat (get-player-cards new-owner) card-id) u100) ERR-NOT-FOUND) })
+        (map-set card-details 
+          { card-id: card-id }
+          (merge (unwrap-panic card) { card-owner: to }))
         (ok true))
-      ERR-NOT-FOUND)
-    ERR-NOT-FOUND
-  )
-)
+      ERR-INVALID-TRANSFER)))
 
 ;; Public functions
-
-(define-public (mint-new-card (card-name (string-ascii 24)) (attack-value uint) (defense-value uint) (rarity-value uint) (recipient-address principal))
-  (let ((new-card-id (var-get next-available-card-id)))
-    (if (is-eq tx-sender CONTRACT-OWNER)
+(define-public (mint-card (name (string-ascii 24)) (attack uint) (defense uint) (rarity uint) (recipient principal))
+  (let ((id (var-get next-card-id)))
+    (if (is-eq tx-sender (var-get contract-owner))
       (begin
-        (map-set card-details { card-id: new-card-id }
-          { name: card-name, attack-power: attack-value, defense-power: defense-value, rarity-level: rarity-value, card-owner: recipient-address })
-        (map-set player-card-collection { player: recipient-address }
-          { owned-card-ids: (unwrap! (as-max-len? (concat (get-player-cards recipient-address) new-card-id) u100) ERR-NOT-FOUND) })
-        (var-set next-available-card-id (+ new-card-id u1))
-        (ok new-card-id))
-      ERR-OWNER-ONLY)
-  )
-)
+        (map-set card-details { card-id: id }
+          { 
+            name: name,
+            attack-power: attack,
+            defense-power: defense,
+            rarity-level: rarity,
+            card-owner: recipient
+          })
+        (var-set next-card-id (+ id u1))
+        (ok id))
+      ERR-OWNER-ONLY)))
 
-(define-public (transfer-card (card-id uint) (recipient-address principal))
-  (let ((sender-address tx-sender))
-    (if (not (var-get is-game-paused))
-      (transfer-card-ownership card-id sender-address recipient-address)
-      ERR-OWNER-ONLY)
-  )
-)
+(define-public (transfer-card (card-id uint) (recipient principal))
+  (let ((sender tx-sender))
+    (if (not (var-get is-paused))
+        (transfer-ownership card-id sender recipient)
+        ERR-OWNER-ONLY)))
 
-(define-public (initiate-card-battle (attacker-card-id uint) (defender-card-id uint))
+(define-public (battle (attacker-id uint) (defender-id uint))
   (let (
-    (attacker-card (unwrap! (map-get? card-details { card-id: attacker-card-id }) ERR-NOT-FOUND))
-    (defender-card (unwrap! (map-get? card-details { card-id: defender-card-id }) ERR-NOT-FOUND))
+    (attacker (get-card-info attacker-id))
+    (defender (get-card-info defender-id))
   )
     (if (and
-      (is-eq (get card-owner attacker-card) tx-sender)
-      (not (is-eq (get card-owner defender-card) tx-sender))
-      (not (var-get is-game-paused)))
-      (if (> (get attack-power attacker-card) (get defense-power defender-card))
-        (begin
-          (transfer-card-ownership defender-card-id (get card-owner defender-card) tx-sender)
-          (ok true))
-        (ok false))
-      ERR-OWNER-ONLY)
-  )
-)
+          (is-some attacker)
+          (is-some defender)
+          (is-eq (get card-owner (unwrap-panic attacker)) tx-sender)
+          (not (is-eq (get card-owner (unwrap-panic defender)) tx-sender))
+          (not (var-get is-paused)))
+        (if (> (get attack-power (unwrap-panic attacker)) 
+               (get defense-power (unwrap-panic defender)))
+            (transfer-ownership defender-id 
+              (get card-owner (unwrap-panic defender)) 
+              tx-sender)
+            (ok false))
+        ERR-OWNER-ONLY)))
 
-(define-public (purchase-card (card-id uint) (offer-price uint))
+(define-public (purchase-card (card-id uint) (price uint))
   (let (
-    (buyer-address tx-sender)
-    (card (unwrap! (map-get? card-details { card-id: card-id }) ERR-NOT-FOUND))
-    (seller-address (get card-owner card))
+    (card (get-card-info card-id))
+    (buyer tx-sender)
   )
-    (if (and (not (is-eq buyer-address seller-address)) (not (var-get is-game-paused)))
-      (match (stx-transfer? offer-price buyer-address seller-address)
-        success (transfer-card-ownership card-id seller-address buyer-address)
-        error ERR-INSUFFICIENT-BALANCE)
-      ERR-OWNER-ONLY)
-  )
-)
+    (if (and 
+          (is-some card)
+          (not (is-eq buyer (get card-owner (unwrap-panic card))))
+          (not (var-get is-paused)))
+        (match (stx-transfer? price buyer (get card-owner (unwrap-panic card)))
+          success (transfer-ownership card-id (get card-owner (unwrap-panic card)) buyer)
+          error ERR-INSUFFICIENT-BALANCE)
+        ERR-OWNER-ONLY)))
 
 ;; Admin functions
+(define-public (pause)
+  (if (is-eq tx-sender (var-get contract-owner))
+      (ok (var-set is-paused true))
+      ERR-OWNER-ONLY))
 
-(define-public (pause-game-operations)
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (begin
-      (var-set is-game-paused true)
-      (ok true))
-    ERR-OWNER-ONLY)
-)
+(define-public (unpause)
+  (if (is-eq tx-sender (var-get contract-owner))
+      (ok (var-set is-paused false))
+      ERR-OWNER-ONLY))
 
-(define-public (resume-game-operations)
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (begin
-      (var-set is-game-paused false)
-      (ok true))
-    ERR-OWNER-ONLY)
-)
-
-(define-public (transfer-contract-ownership (new-owner-address principal))
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (begin
-      (var-set CONTRACT-OWNER new-owner-address)
-      (ok true))
-    ERR-OWNER-ONLY)
-)
+(define-public (set-contract-owner (new-owner principal))
+  (if (is-eq tx-sender (var-get contract-owner))
+      (ok (var-set contract-owner new-owner))
+      ERR-OWNER-ONLY))
